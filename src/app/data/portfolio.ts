@@ -56,7 +56,7 @@ export const projects: Project[] = [
     tagline: 'Email/password + GitHub OAuth on Android with Supabase',
     year: '2025',
     category: 'Android / Authentication',
-    image: 'https://images.unsplash.com/photo-1614064641938-3bbee52942c7?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxzZWN1cml0eSUyMGxvY2slMjBkaWdpdGFsJTIwYmx1ZXxlbnwxfHx8fDE3NzU0MTgxMjJ8MA&ixlib=rb-4.1.0&q=80&w=1080',
+    image: '/projects/auth-system.png',
     color: '#34D399',
     problem: 'Understanding real-world authentication flows in mobile apps beyond theory — implementing secure login systems that handle sessions, OAuth, and user data correctly.',
     approach: 'Built an Android app using Kotlin, Jetpack Compose, and Supabase to implement email/password login, GitHub OAuth, and complete user data storage with session handling.',
