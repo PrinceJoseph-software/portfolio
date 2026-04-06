@@ -1,95 +1,83 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { validateContact } from './_utils/validation';
-import { sanitize } from './_utils/security';
-import * as fs from 'fs';
-import * as path from 'path';
 
-// Simple in-memory rate limit tracker (resets per cold start)
-// For production, use Vercel KV or Upstash Redis
-const requests = new Map<string, { count: number; reset: number }>();
+// Simple in-memory rate limiter (resets on cold start — fine for a portfolio)
+const rateMap = new Map<string, { count: number; reset: number }>();
 const RATE_LIMIT = 5;
-const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const WINDOW_MS = 15 * 60 * 1000;
 
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = requests.get(ip);
-  if (!entry || now > entry.reset) {
-    requests.set(ip, { count: 1, reset: now + WINDOW_MS });
-    return true;
-  }
-  if (entry.count >= RATE_LIMIT) return false;
-  entry.count++;
-  return true;
+function getIp(req: VercelRequest): string {
+  const fwd = req.headers['x-forwarded-for'];
+  return (typeof fwd === 'string' ? fwd.split(',')[0] : req.socket?.remoteAddress) ?? 'unknown';
 }
 
-function getClientIp(req: VercelRequest): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return req.socket?.remoteAddress ?? 'unknown';
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateMap.get(ip);
+  if (!entry || now > entry.reset) {
+    rateMap.set(ip, { count: 1, reset: now + WINDOW_MS });
+    return false;
+  }
+  if (entry.count >= RATE_LIMIT) return true;
+  entry.count++;
+  return false;
+}
+
+function sanitize(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/on\w+\s*=/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2000);
+}
+
+function validate(name: string, email: string, message: string): string | null {
+  if (!name || name.length < 2) return 'Name must be at least 2 characters.';
+  if (name.length > 60) return 'Name is too long (max 60 characters).';
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'Please enter a valid email address.';
+  if (!message || message.length < 10) return 'Message must be at least 10 characters.';
+  if (message.length > 1200) return 'Message is too long (max 1200 characters).';
+  return null;
 }
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   // Security headers
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN ?? '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  // Rate limiting
-  const ip = getClientIp(req);
-  if (!checkRateLimit(ip)) {
+  const ip = getIp(req);
+  if (isRateLimited(ip)) {
     return res.status(429).json({ error: 'Too many requests. Please wait before sending another message.' });
   }
 
-  // Body size guard
   const body = req.body;
   if (!body || typeof body !== 'object') {
-    return res.status(400).json({ error: 'Invalid request body' });
+    return res.status(400).json({ error: 'Invalid request body.' });
   }
 
-  // Sanitize
-  const sanitized = {
-    name: sanitize(String(body.name ?? '')),
-    email: sanitize(String(body.email ?? '')),
-    message: sanitize(String(body.message ?? '')),
-  };
+  const name = sanitize(body.name);
+  const email = sanitize(body.email);
+  const message = sanitize(body.message);
 
-  // Validate
-  const errors = validateContact(sanitized);
-  if (errors) {
-    return res.status(400).json({ error: errors });
-  }
+  const validationError = validate(name, email, message);
+  if (validationError) return res.status(400).json({ error: validationError });
 
-  // Store message (append to JSON file — works on Vercel via /tmp)
-  try {
-    const store = path.join('/tmp', 'messages.json');
-    let messages: unknown[] = [];
-    if (fs.existsSync(store)) {
-      try { messages = JSON.parse(fs.readFileSync(store, 'utf-8')); } catch { messages = []; }
-    }
-    messages.push({
-      id: Date.now().toString(36),
-      name: sanitized.name,
-      email: sanitized.email,
-      message: sanitized.message,
-      receivedAt: new Date().toISOString(),
-      ip: ip.slice(0, 10) + '...',  // Partial IP only for privacy
-    });
-    fs.writeFileSync(store, JSON.stringify(messages, null, 2));
-  } catch {
-    // Storage failure is non-fatal — still respond success so user isn't blocked
-    console.error('[contact] Failed to write message store');
-  }
+  // Log to Vercel function logs (visible in Vercel Dashboard > Functions tab)
+  console.log(JSON.stringify({
+    event: 'contact_form_submission',
+    from: name,
+    email,
+    preview: message.slice(0, 80),
+    receivedAt: new Date().toISOString(),
+  }));
 
   return res.status(200).json({ success: true });
 }
